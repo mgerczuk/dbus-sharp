@@ -72,6 +72,13 @@ namespace DBus.Protocol
 			}
 		}
 
+		public IEnumerable<object> ReadValues ()
+		{
+			for (int i = 0; i < message.Signature.Length; ++i) {
+				yield return ReadValue (message.Signature[i]);
+			}
+		}
+
 		public object ReadValue (Type type)
 		{
 			if (type == typeof (void))
@@ -87,6 +94,9 @@ namespace DBus.Protocol
 			} else if (type == typeof (ObjectPath)) {
 				readValueCache[type] = () => ReadObjectPath ();
 				return ReadObjectPath ();
+			} else if (type == typeof (FileDescriptor)) {
+				readValueCache[type] = () => ReadFileDescriptor();
+				return ReadFileDescriptor();
 			} else if (type == typeof (Signature)) {
 				readValueCache[type] = () => ReadSignature ();
 				return ReadSignature ();
@@ -96,7 +106,9 @@ namespace DBus.Protocol
 			} else if (type == typeof (string)) {
 				readValueCache[type] = () => ReadString ();
 				return ReadString ();
-			} else if (type.IsGenericType && (type.GetGenericTypeDefinition () == typeof (Dictionary<,>) || type.GetGenericTypeDefinition() == typeof(IDictionary<,>))) {
+			} else if (type.IsGenericType 
+					&& (type.GetGenericTypeDefinition().IsAssignableFrom(typeof(Dictionary<,>)) 
+					|| type.GetGenericTypeDefinition().IsAssignableFrom(typeof(IDictionary<,>)))) {
 				Type[] genArgs = type.GetGenericArguments ();
 				readValueCache[type] = () => ReadDictionary (genArgs[0], genArgs[1]);
 				return ReadDictionary (genArgs[0], genArgs[1]);
@@ -165,6 +177,9 @@ namespace DBus.Protocol
 
 				case DType.Variant:
 					return ReadVariant ();
+
+				case DType.UnixFileDescriptor:
+				return ReadFileDescriptor();
 
 				default:
 					throw new Exception ("Unhandled D-Bus type: " + dtype);
@@ -364,6 +379,37 @@ namespace DBus.Protocol
 			return new ObjectPath (ReadString ());
 		}
 
+		public FileDescriptor ReadFileDescriptor ()
+		{
+			int fdIndex = ReadInt32 ();
+			if (message.Connection.SupportsUnixFileDescriptors) {
+				object count;
+				if (message.Header.TryGetField (FieldCode.UnixFds, out count)) {
+					//System.Console.WriteLine ("FD Count " + count+","+count.GetType());
+					if ((uint)fdIndex >= ((uint)count)) {
+						throw new IndexOutOfRangeException ("Specified file descriptor index is outside the range of supplied file descriptors");
+					} else if (message.UnixFDS != null && fdIndex < message.UnixFDS.Length) {
+						int fd = message.UnixFDS [fdIndex];
+
+						var descriptor = new FileDescriptor (fd);
+						return descriptor;
+					} 
+					else 
+					{
+						throw new Exception("No file descriptors read from control message");
+					}
+				} else {
+					throw new Exception ("Missing file descriptors");
+				}
+			} 
+			else 
+			{
+				//would it be better to return a "special" file descriptor that indicates it's not supported
+				//that way the rest of the params can come through?
+				throw new NotSupportedException ("The current connection does not support unix file descriptors");
+			}
+		}
+
 		public Signature ReadSignature ()
 		{
 			byte ln = ReadByte ();
@@ -479,12 +525,12 @@ namespace DBus.Protocol
 
 			if (endianness == Connection.NativeEndianness) {
 				Buffer.BlockCopy (data, pos, array, 0, (int)length);
+				pos += (int)length;
 			} else {
 				GCHandle handle = GCHandle.Alloc (array, GCHandleType.Pinned);
 				DirectCopy (sof, length, handle);
 				handle.Free ();
 			}
-			pos += (int)length;
 
 			return array;
 		}
@@ -504,6 +550,8 @@ namespace DBus.Protocol
 					for (int j = i; j < i + sof; j++)
 						ptr[2 * i - pos + (sof - 1) - j] = data[j];
 			}
+
+			pos += (int)length /** sof*/;
 		}
 
 		bool[] MarshalBoolArray (uint length)
@@ -562,9 +610,7 @@ namespace DBus.Protocol
 			object strct = Activator.CreateInstance (structType);
 			int sof = Marshal.SizeOf (fis[0].FieldType);
 			GCHandle handle = GCHandle.Alloc (strct, GCHandleType.Pinned);
-			uint length = (uint)(fis.Length * sof);
-			DirectCopy (sof, length, handle);
-			pos += (int)length;
+			DirectCopy (sof, (uint)(fis.Length * sof), handle);
 			handle.Free ();
 
 			return strct;
