@@ -400,6 +400,7 @@ namespace DBus.Authentication
 						SupportsUnixFileDescriptors = false;
 					}
 				} else {
+					Peer.isFinalRead = true;
 				}
 
 				yield return new AuthCommand ("BEGIN");
